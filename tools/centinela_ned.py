@@ -287,8 +287,8 @@ def _nct_estados_desde_cache(con_edad=False, edades=None):
         if not isinstance(info, dict):
             continue
         status = info.get("overallStatus")
-        if status is not None:
-            resultado[nct_id.upper()] = str(status).strip()[:64]
+        if isinstance(status, str) and status.strip():
+            resultado[nct_id.upper()] = status.strip()[:64]
             por_nct[nct_id.upper()] = _nct_cache_edad_h(
                 info if "_ts_consulta" in info else raw)
     if edades is not None:
