@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     env:
-      BASE: d41b888327fefdfe6af0c0e667bfb21b452bbefe
-      PARCHE: 57e563a9fca446c63149f8a0f42eb581fdd17c20
+      BASE: 37d7339e4604abee7b13139b9a26196e33169b5b
+      PARCHE: d47498a4d74384ad572050fc0277da05ab2a9305
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,6 +31,58 @@ jobs:
           python3 tools/ci_barrido.py --selftest
           python3 -m compileall -q tools tests pipeline evals
           git diff --check "$BASE" "$PARCHE"
+      - name: Canario contra master sin el fix
+        shell: bash
+        run: |
+          set -e
+          cp "$RUNNER_TEMP/nct-base/tests/test_centinela_ned.py" "$RUNNER_TEMP/test_centinela_base_original.py"
+          cp "$RUNNER_TEMP/nct-parche/tests/test_centinela_ned.py" "$RUNNER_TEMP/nct-base/tests/test_centinela_ned.py"
+          set +e
+          (
+            cd "$RUNNER_TEMP/nct-base"
+            HOME="$RUNNER_TEMP/home-canario" BTP_REPO="$RUNNER_TEMP/nct-base" \
+              BTP_STATE_DIR="$RUNNER_TEMP/state-canario" python3 tests/test_centinela_ned.py
+          ) >"$RUNNER_TEMP/canario.log" 2>&1
+          rc=$?
+          set -e
+          cp "$RUNNER_TEMP/test_centinela_base_original.py" "$RUNNER_TEMP/nct-base/tests/test_centinela_ned.py"
+          if [ "$rc" -eq 0 ]; then
+            echo "ERROR: los tests nuevos no detectan el bug en master"
+            exit 1
+          fi
+          echo "Canario OK: master sin fix queda rojo como se esperaba (rc=$rc)"
+
+      - name: Mutante deliberado del fix queda rojo
+        shell: bash
+        run: |
+          set -e
+          cp "$RUNNER_TEMP/nct-parche/tools/actualizar_nct_cache.py" "$RUNNER_TEMP/updater.bak"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ["RUNNER_TEMP"]) / "nct-parche/tools/actualizar_nct_cache.py"
+          s=p.read_text()
+          old='    if completo:\n        cache["_ts_consulta"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")'
+          new='    if True:\n        cache["_ts_consulta"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")'
+          if old not in s:
+              raise SystemExit("ancla del mutante no encontrada")
+          p.write_text(s.replace(old,new))
+          PY
+          set +e
+          (
+            cd "$RUNNER_TEMP/nct-parche"
+            HOME="$RUNNER_TEMP/home-mutante" BTP_REPO="$RUNNER_TEMP/nct-parche" \
+              BTP_STATE_DIR="$RUNNER_TEMP/state-mutante" python3 tests/test_centinela_ned.py
+          ) >"$RUNNER_TEMP/mutante.log" 2>&1
+          rc=$?
+          set -e
+          cp "$RUNNER_TEMP/updater.bak" "$RUNNER_TEMP/nct-parche/tools/actualizar_nct_cache.py"
+          if [ "$rc" -eq 0 ]; then
+            echo "ERROR: el mutante que rejuvenece tras fallo no fue detectado"
+            exit 1
+          fi
+          echo "Mutante OK: rejuvenecer el global tras fallo pone la suite roja (rc=$rc)"
+
       - name: Repetir entrada_guard aislado
         shell: bash
         run: |
