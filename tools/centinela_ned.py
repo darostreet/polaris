@@ -278,6 +278,9 @@ def _nct_estados_desde_cache(con_edad=False, edades=None):
     if not isinstance(raw, dict):
         return ({}, None) if con_edad else {}
     resultado, por_nct = {}, {}
+    fechas = raw.get("_ts_consultas")
+    if not isinstance(fechas, dict):
+        fechas = {}
     for nct_id, info in raw.items():
         # nct_id debe tener pinta de NCT (prefijo + 6+ dígitos); ignora cualquier otra cosa
         nct_id = str(nct_id).strip()
@@ -288,9 +291,11 @@ def _nct_estados_desde_cache(con_edad=False, edades=None):
             continue
         status = info.get("overallStatus")
         if isinstance(status, str) and status.strip():
-            resultado[nct_id.upper()] = status.strip()[:64]
-            por_nct[nct_id.upper()] = _nct_cache_edad_h(
-                info if "_ts_consulta" in info else raw)
+            clave = nct_id.upper()
+            resultado[clave] = status.strip()[:64]
+            fuente_fecha = ({"_ts_consulta": fechas[clave]}
+                            if clave in fechas else raw)
+            por_nct[clave] = _nct_cache_edad_h(fuente_fecha)
     if edades is not None:
         edades.update(por_nct)
     valores = list(por_nct.values())
