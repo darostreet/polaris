@@ -120,6 +120,9 @@ def _cache_necesita_actualizacion(cache, ncts):
     """True si algún NCT vigilado falta o su última consulta exitosa superó el TTL.
     La fecha global solo es respaldo para registros legados SIN fecha propia."""
     ahora = datetime.now(tz=timezone.utc)
+    fechas = cache.get("_ts_consultas")
+    if not isinstance(fechas, dict):
+        fechas = {}
     for nct in ncts:
         info = cache.get(nct)
         if info is None:
@@ -128,12 +131,11 @@ def _cache_necesita_actualizacion(cache, ncts):
             estado = info.get("overallStatus")
             if not isinstance(estado, str) or not estado.strip():
                 return True
-            ts_str = info.get("_ts_consulta", cache.get("_ts_consulta"))
-        elif isinstance(info, str) and info.strip():
-            # Compatibilidad con un formato legado que guardaba el estado como string.
-            ts_str = cache.get("_ts_consulta")
-        else:
+        elif not (isinstance(info, str) and info.strip()):
             return True
+        # Mantiene intacta la forma histórica de cada NCT ({overallStatus: ...}).
+        # Si hay fecha propia, incluso una ilegible, NO cae a la global.
+        ts_str = fechas[nct] if nct in fechas else cache.get("_ts_consulta")
         try:
             ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
             if ts.tzinfo is None:
@@ -161,14 +163,16 @@ def actualizar(forzar=False):
     print("Consultando ClinicalTrials.gov para: %s" % ", ".join(sorted(ncts)))
     cambios = []
     completo = True
-    # Fijar la fecha LEGADA antes de mover la global: un éxito de A no rejuvenece B,
-    # ni siquiera si B dejó de vigilarse y vuelve a entrar después. None = fecha desconocida.
-    for nct_id, info in list(cache.items()):
+    # Las fechas por NCT viven en METADATOS separados: no cambiamos la forma histórica
+    # de cache[NCT] == {"overallStatus": ...}, por compatibilidad con consumidores externos.
+    fechas = cache.get("_ts_consultas")
+    if not isinstance(fechas, dict):
+        fechas = {}
+    fecha_legada = cache.get("_ts_consulta")
+    for nct_id in list(cache):
         if re.fullmatch(r"NCT\d{6,}", nct_id, re.IGNORECASE):
-            if isinstance(info, str):
-                info = cache[nct_id] = {"overallStatus": info}
-            if isinstance(info, dict):
-                info.setdefault("_ts_consulta", cache.get("_ts_consulta"))
+            fechas.setdefault(nct_id, fecha_legada)
+    cache["_ts_consultas"] = fechas
     for nct_id in sorted(ncts):
         prev = cache.get(nct_id, {})
         prev_status = prev.get("overallStatus") if isinstance(prev, dict) else prev
@@ -177,8 +181,8 @@ def actualizar(forzar=False):
             completo = False
             print("  %s: sin respuesta (se conserva el estado previo: %s)" % (nct_id, prev_status or "desconocido"))
             continue
-        cache[nct_id] = {"overallStatus": nuevo_status,
-                         "_ts_consulta": datetime.now(tz=timezone.utc).isoformat(timespec="seconds")}
+        cache[nct_id] = {"overallStatus": nuevo_status}
+        fechas[nct_id] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
         if prev_status and prev_status != nuevo_status:
             cambios.append((nct_id, prev_status, nuevo_status))
             print("  %s: CAMBIO %s -> %s" % (nct_id, prev_status, nuevo_status))
@@ -201,6 +205,9 @@ def status():
     cache = _cargar_cache()
     ncts = _nct_ids_vigilados()
     ts = cache.get("_ts_consulta", "nunca")
+    fechas = cache.get("_ts_consultas")
+    if not isinstance(fechas, dict):
+        fechas = {}
     print("Ultima consulta completa: %s" % ts)
     print("NCTs vigilados: %s" % (", ".join(sorted(ncts)) or "(ninguno)"))
     for nct_id in sorted(ncts):
@@ -208,8 +215,7 @@ def status():
         if isinstance(info, dict):
             info = info.get("overallStatus", "(sin overallStatus)")
         print("  %s: %s" % (nct_id, info))
-        entrada = cache.get(nct_id)
-        fecha = entrada.get("_ts_consulta", ts) if isinstance(entrada, dict) else ts
+        fecha = fechas[nct_id] if nct_id in fechas else ts
         print("    ultima consulta exitosa: %s" % (fecha or "desconocida"))
 
 
