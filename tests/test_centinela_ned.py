@@ -247,8 +247,8 @@ class FrescuraNctCache(unittest.TestCase):
         datos = {"_ts_consulta": fecha}
         for n in (NCT_A, NCT_B):
             datos[n] = {"overallStatus": "RECRUITING"}
-            if propia:
-                datos[n]["_ts_consulta"] = fecha
+        if propia:
+            datos["_ts_consultas"] = {NCT_A: fecha, NCT_B: fecha}
         self.up._guardar_cache(datos)
         return datos
 
@@ -277,7 +277,7 @@ class FrescuraNctCache(unittest.TestCase):
         self._cache()
         _, c = self._actualizar({NCT_A: "SUSPENDED", NCT_B: "COMPLETED"})
         self.assertEqual(c["_ts_consulta"], NCT_AHORA.isoformat())
-        self.assertEqual(c[NCT_A]["_ts_consulta"], NCT_AHORA.isoformat())
+        self.assertEqual(c["_ts_consultas"][NCT_A], NCT_AHORA.isoformat())
         self.assertEqual(c[NCT_B]["overallStatus"], "COMPLETED")
         self.assertEqual(self.http.call_count, 2)
         self._actualizar({})  # no debe consultar durante el TTL
@@ -326,7 +326,7 @@ class FrescuraNctCache(unittest.TestCase):
     def test_fallo_reciente_conserva_edad_no_invalida_dato_aun_fresco(self):
         self._cache(edad=2, propia=True)
         _, c = self._actualizar({NCT_A: None, NCT_B: "RECRUITING"}, forzar=True)
-        self.assertEqual(c[NCT_A]["_ts_consulta"], (NCT_AHORA-datetime.timedelta(hours=2)).isoformat())
+        self.assertEqual(c["_ts_consultas"][NCT_A], (NCT_AHORA-datetime.timedelta(hours=2)).isoformat())
         self.assertTrue(self._status()["nct_cache_fresco"])
         self.assertNotIn("nct-rancio", [t for t, _ in self.cn.detectar()[0]])
 
@@ -364,7 +364,7 @@ class FrescuraNctCache(unittest.TestCase):
     def test_cache_legado_sin_fecha_no_hereda_exito_ajeno(self):
         c = self._cache(); del c["_ts_consulta"]; self.up._guardar_cache(c)
         _, c = self._actualizar({NCT_A: None, NCT_B: "COMPLETED"})
-        self.assertIsNone(c[NCT_A]["_ts_consulta"])
+        self.assertIsNone(c["_ts_consultas"][NCT_A])
         self.assertIsNone(self._status()["nct_cache_edades_h"][NCT_A])
 
     def test_fecha_propia_mala_no_cae_a_global_reciente(self):
@@ -372,7 +372,7 @@ class FrescuraNctCache(unittest.TestCase):
                       (NCT_AHORA + datetime.timedelta(hours=1)).isoformat()):
             with self.subTest(fecha=fecha):
                 c = self._cache(edad=1, propia=True)
-                c[NCT_A]["_ts_consulta"] = fecha; self.up._guardar_cache(c)
+                c["_ts_consultas"][NCT_A] = fecha; self.up._guardar_cache(c)
                 self.assertTrue(self.up._cache_necesita_actualizacion(c, {NCT_A, NCT_B}))
                 self.assertFalse(self._status()["nct_cache_fresco"])
                 self.assertIn("nct-rancio", [t for t, _ in self.cn.detectar()[0]])
@@ -407,7 +407,7 @@ class FrescuraNctCache(unittest.TestCase):
             with self.subTest(ts=ts):
                 c = self._cache(propia=True)
                 for n in (NCT_A, NCT_B):
-                    c[n]["_ts_consulta"] = ts
+                    c["_ts_consultas"][n] = ts
                 self.up._guardar_cache(c)
                 self.assertFalse(self.up._cache_necesita_actualizacion(c, {NCT_A, NCT_B}))
                 self.assertEqual(self._status()["nct_cache_edades_h"], {NCT_A: 3.0, NCT_B: 3.0})
@@ -443,10 +443,11 @@ class FrescuraNctCache(unittest.TestCase):
 
     def test_respeta_fecha_propia_antes_del_fallo(self):
         c = self._cache(edad=72, propia=True)
-        c[NCT_A]["_ts_consulta"] = (NCT_AHORA-datetime.timedelta(hours=24)).isoformat()
+        c["_ts_consultas"][NCT_A] = (NCT_AHORA-datetime.timedelta(hours=24)).isoformat()
         self.up._guardar_cache(c)
         _, nuevo = self._actualizar({NCT_A: None, NCT_B: "COMPLETED"})
         self.assertEqual(nuevo[NCT_A], c[NCT_A])
+        self.assertEqual(nuevo["_ts_consultas"][NCT_A], c["_ts_consultas"][NCT_A])
         self.assertEqual(self._status()["nct_cache_edades_h"][NCT_A], 24.0)
 
     def test_no_oculta_cambio_de_foco_o_plazo(self):
@@ -476,6 +477,13 @@ class FrescuraNctCache(unittest.TestCase):
                 self.assertNotIn(NCT_A, self.cn._nct_estados_desde_cache())
                 self.assertFalse(self._status()["nct_cache_fresco"])
                 self.assertIn("nct-rancio", [t for t, _ in self.cn.detectar()[0]])
+
+    def test_objeto_nct_conserva_forma_historica(self):
+        self._cache()
+        _, c = self._actualizar({NCT_A: "COMPLETED", NCT_B: "RECRUITING"})
+        self.assertEqual(c[NCT_A], {"overallStatus": "COMPLETED"})
+        self.assertEqual(c[NCT_B], {"overallStatus": "RECRUITING"})
+        self.assertIn(NCT_A, c["_ts_consultas"])
 
     def test_metadata_no_es_un_ensayo_y_no_cambia_estado(self):
         c = self._cache(edad=1, propia=True)
