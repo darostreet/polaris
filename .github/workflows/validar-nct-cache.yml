@@ -1,0 +1,90 @@
+name: validar-nct-cache
+on:
+  push:
+    branches: [validation/nct-cache-frescura]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  comparar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE: d41b888327fefdfe6af0c0e667bfb21b452bbefe
+      PARCHE: 812a4345ba67d44680d9d79ee50ac9cc78692fe4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Dependencias del CI publico
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils tesseract-ocr
+      - name: Preparar dos arboles del mismo repositorio
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/nct-base" "$BASE"
+          git worktree add --detach "$RUNNER_TEMP/nct-parche" "$PARCHE"
+          mkdir -p "$RUNNER_TEMP/nct-resultados"
+      - name: Barrido y sintaxis del parche
+        working-directory: ${{ runner.temp }}/nct-parche
+        run: |
+          python3 tools/ci_barrido.py --diff "$BASE...$PARCHE"
+          python3 tools/ci_barrido.py --selftest
+          python3 -m compileall -q tools tests pipeline evals
+          git diff --check "$BASE" "$PARCHE"
+      - name: Bateria completa antes y despues
+        shell: bash
+        run: |
+          set +e
+          for version in base parche; do
+            root="$RUNNER_TEMP/nct-$version"
+            mkdir -p "$RUNNER_TEMP/nct-resultados/$version" "$RUNNER_TEMP/nct-state-$version"
+            (
+              cd "$root" || exit 125
+              BTP_REPO="$root" BTP_STATE_DIR="$RUNNER_TEMP/nct-state-$version" \
+                BTP_ROJO_DIR="$RUNNER_TEMP/nct-resultados/$version" \
+                BTP_TEST_BATTERY=1 BTP_PORTABLE=1 \
+                timeout 1100 bash tests/test_all.sh
+            ) > "$RUNNER_TEMP/nct-resultados/$version.log" 2>&1
+            echo $? > "$RUNNER_TEMP/nct-resultados/$version.rc"
+          done
+      - name: Suite del centinela con dependencias reales del repo
+        working-directory: ${{ runner.temp }}/nct-parche
+        run: python3 tests/test_centinela_ned.py
+      - name: Comparar fallos sin publicar logs crudos
+        if: always()
+        shell: python
+        run: |
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'nct-resultados'
+          datos = {}
+          for version in ('base', 'parche'):
+              logfile, rcfile = root / (version + '.log'), root / (version + '.rc')
+              if not logfile.exists() or not rcfile.exists():
+                  raise SystemExit('Validacion incompleta: faltan resultados de ' + version)
+              texto = logfile.read_text(errors='replace')
+              datos[version] = {
+                  'rc': int(rcfile.read_text()),
+                  'ejecutadas': re.findall(r'^── ([^ ]+) ──', texto, re.M),
+                  'rojas': sorted(set(re.findall(r'ROJO: ([^ ]+)', texto))),
+                  'resumen': texto.splitlines()[-5:],
+              }
+          nuevas = sorted(set(datos['parche']['rojas']) - set(datos['base']['rojas']))
+          faltan = sorted(set(datos['base']['ejecutadas']) - set(datos['parche']['ejecutadas']))
+          resultado = {'base': os.environ['BASE'], 'parche': os.environ['PARCHE'],
+                       'baterias_base': len(datos['base']['ejecutadas']),
+                       'baterias_parche': len(datos['parche']['ejecutadas']),
+                       'rojas_base': datos['base']['rojas'], 'rojas_parche': datos['parche']['rojas'],
+                       'rojas_nuevas': nuevas, 'baterias_ausentes': faltan,
+                       'rc_base': datos['base']['rc'], 'rc_parche': datos['parche']['rc']}
+          print(json.dumps(resultado, indent=2))
+          (root / 'comparacion.json').write_text(json.dumps(resultado, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## Comparacion de regresiones NCT\n```json\n' + json.dumps(resultado, indent=2) + '\n```\n')
+          if (nuevas or faltan or not datos['base']['ejecutadas']
+              or datos['base']['rc'] not in (0, 1) or datos['parche']['rc'] not in (0, 1)):
+              raise SystemExit('Hay fallos nuevos o la comparacion no se completo')
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: comparacion-nct-cache
+          path: ${{ runner.temp }}/nct-resultados/comparacion.json
