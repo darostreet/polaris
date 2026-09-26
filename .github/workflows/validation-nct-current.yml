@@ -1,0 +1,56 @@
+name: validation-nct-current
+on:
+  push:
+    branches: [validation/nct-cache-current-4de6b45]
+permissions:
+  contents: read
+jobs:
+  focal:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Focal NCT
+        run: python3 tests/test_centinela_ned.py
+      - name: Barrido y sintaxis
+        run: |
+          python3 tools/ci_barrido.py --diff 4de6b45c66209269179d64862c1808646cee889a...HEAD
+          python3 tools/ci_barrido.py --selftest
+          python3 -m compileall -q tools tests
+          git diff --check 4de6b45c66209269179d64862c1808646cee889a...HEAD
+  bateria:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dependencias CI público
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils tesseract-ocr >/dev/null
+      - name: Batería y comparación con master actual
+        shell: bash
+        run: |
+          set +e
+          BTP_PORTABLE=1 bash tests/test_all.sh
+          rc=$?
+          set -e
+          mapfile -t reds < <(find /tmp -maxdepth 1 -type f -name 'rojo-*.log' -printf '%f\n' | sed 's/^rojo-//' | sed 's/\.log$//' | sort)
+          printf 'ROJOS:\n'; printf '%s\n' "${reds[@]}"
+          expected=(
+            test_fichas.py
+            test_gate_punto08.py
+            test_gate_s15.py
+            test_radar_personas.py
+            test_secretos_largos_paralelo.py
+          )
+          mapfile -t exp < <(printf '%s\n' "${expected[@]}" | sort)
+          if [ "${reds[*]}" != "${exp[*]}" ]; then
+            echo "::error::Conjunto de rojos distinto de master actual"
+            exit 1
+          fi
+          echo "Mismo conjunto de 5 rojos que master actual"
+          exit 0
