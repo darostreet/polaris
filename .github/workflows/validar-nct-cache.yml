@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 50
     env:
       BASE: d41b888327fefdfe6af0c0e667bfb21b452bbefe
-      PARCHE: 812a4345ba67d44680d9d79ee50ac9cc78692fe4
+      PARCHE: 57e563a9fca446c63149f8a0f42eb581fdd17c20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,9 +40,11 @@ jobs:
             echo "== $version =="
             for i in $(seq 1 20); do
               state=$(mktemp -d "$RUNNER_TEMP/entrada-$version-$i.XXXX")
+              home=$(mktemp -d "$RUNNER_TEMP/home-entrada-$version-$i.XXXX")
               if ! (
                 cd "$root"
-                BTP_REPO="$root" BTP_STATE_DIR="$state" BTP_TEST_BATTERY=1 BTP_PORTABLE=1                   python3 tests/test_entrada_guard.py
+                HOME="$home" BTP_REPO="$root" BTP_STATE_DIR="$state" BTP_TEST_BATTERY=1 BTP_PORTABLE=1 \
+                  python3 tests/test_entrada_guard.py
               ) >"$RUNNER_TEMP/entrada-$version-$i.log" 2>&1; then
                 echo "FALLO $version repeticion $i"
                 cat "$RUNNER_TEMP/entrada-$version-$i.log"
