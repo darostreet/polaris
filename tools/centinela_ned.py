@@ -241,7 +241,9 @@ def _dia_rancio_sellar(mark, rancio):
     caché vuelve a estar fresco se limpia, para que el próximo bache vuelva a avisar."""
     if not rancio:
         return None
-    return mark.get("nct_rancio_avisado") or _hoy_iso()
+    # Si sigue rancio al cambiar de día, la primera alerta del nuevo día debe sellar HOY.
+    # Conservar la fecha de ayer haría que el centinela reavisara en cada pasada (~150 s).
+    return _hoy_iso()
 
 
 def _nct_cache_edad_h(raw):
