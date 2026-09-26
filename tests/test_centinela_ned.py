@@ -420,6 +420,17 @@ class FrescuraNctCache(unittest.TestCase):
         self.cn._guardar_mark(mark)
         self.assertNotIn("nct-rancio", [t for t, _ in self.cn.detectar()[0]])
 
+    def test_aviso_rancio_se_renueva_al_cambiar_de_dia(self):
+        self._cache()
+        self._actualizar({NCT_A: None, NCT_B: None})
+        self.cn._guardar_mark({"ts": "2026-01-01", "nct_estados": {},
+                               "nct_rancio_avisado": "2026-09-25"})
+        av, mark = self.cn.detectar()
+        self.assertIn("nct-rancio", [t for t, _ in av])
+        self.assertEqual(mark["nct_rancio_avisado"], "2026-09-26")
+        self.cn._guardar_mark(mark)
+        self.assertNotIn("nct-rancio", [t for t, _ in self.cn.detectar()[0]])
+
     def test_sin_vigilados_no_consulta_ni_modifica_cache(self):
         previo = self._cache()
         self._vigilar()
