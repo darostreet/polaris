@@ -241,7 +241,9 @@ def _dia_rancio_sellar(mark, rancio):
     caché vuelve a estar fresco se limpia, para que el próximo bache vuelva a avisar."""
     if not rancio:
         return None
-    return mark.get("nct_rancio_avisado") or _hoy_iso()
+    # Si sigue rancio al cambiar de día, la primera alerta del nuevo día debe sellar HOY.
+    # Conservar la fecha de ayer haría que el centinela reavisara en cada pasada (~150 s).
+    return _hoy_iso()
 
 
 def _nct_cache_edad_h(raw):
@@ -253,20 +255,23 @@ def _nct_cache_edad_h(raw):
     if not ts:
         return None
     try:
-        d = datetime.fromisoformat(str(ts))
+        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
     except Exception:
         return None
-    if d.tzinfo is not None:
-        d = d.astimezone().replace(tzinfo=None)
-    return (datetime.now() - d).total_seconds() / 3600.0
+    edad = (datetime.now(d.tzinfo) - d).total_seconds() / 3600.0
+    return edad if edad >= 0 else None   # una fecha futura no demuestra frescura
 
 
-def _nct_estados_desde_cache(con_edad=False):
+def _nct_estados_desde_cache(con_edad=False, edades=None):
     """{nct_id: estado_str} leído del caché local (DATO EXTERNO: solo extrae overallStatus).
     Devuelve {} si el caché no existe o está corrupto. Anti-inyección: no interpreta el contenido
     más allá de extraer el string del campo 'overallStatus'.
 
-    `con_edad=True` devuelve (estados, edad_horas|None) para poder decidir si el dato sirve."""
+    `con_edad=True` devuelve (estados, edad máxima|None); None si alguna edad es desconocida.
+    `edades`, si se pasa un dict, recibe la edad POR NCT de esta misma lectura. Los registros
+    legados sin fecha propia usan la global; una fecha propia ilegible NO cae a la global."""
+    if edades is not None:
+        edades.clear()
     try:
         with open(NCT_CACHE, encoding="utf-8") as f:
             raw = json.load(f)
@@ -274,8 +279,10 @@ def _nct_estados_desde_cache(con_edad=False):
         return ({}, None) if con_edad else {}
     if not isinstance(raw, dict):
         return ({}, None) if con_edad else {}
-    edad = _nct_cache_edad_h(raw)
-    resultado = {}
+    resultado, por_nct = {}, {}
+    fechas = raw.get("_ts_consultas")
+    if not isinstance(fechas, dict):
+        fechas = {}
     for nct_id, info in raw.items():
         # nct_id debe tener pinta de NCT (prefijo + 6+ dígitos); ignora cualquier otra cosa
         nct_id = str(nct_id).strip()
@@ -285,8 +292,16 @@ def _nct_estados_desde_cache(con_edad=False):
         if not isinstance(info, dict):
             continue
         status = info.get("overallStatus")
-        if status is not None:
-            resultado[nct_id.upper()] = str(status).strip()[:64]
+        if isinstance(status, str) and status.strip():
+            clave = nct_id.upper()
+            resultado[clave] = status.strip()[:64]
+            fuente_fecha = ({"_ts_consulta": fechas[clave]}
+                            if clave in fechas else raw)
+            por_nct[clave] = _nct_cache_edad_h(fuente_fecha)
+    if edades is not None:
+        edades.update(por_nct)
+    valores = list(por_nct.values())
+    edad = max(valores) if valores and None not in valores else None
     return (resultado, edad) if con_edad else resultado
 
 
@@ -330,9 +345,13 @@ def detectar():
     criticos, buzon_ids = _correo_estado()
     foco_hash, foco = _foco()
     plazos = _plazos_seguimiento()
-    nct_actuales, nct_edad_h = _nct_estados_desde_cache(con_edad=True)
-    nct_rancio = (nct_edad_h is None) or (nct_edad_h > NCT_CACHE_STALE_H)
+    nct_edades = {}
+    nct_actuales = _nct_estados_desde_cache(edades=nct_edades)
     nct_vigilados = _nct_ids_vigilados()
+    nct_frescos = {n for n in nct_vigilados if nct_edades.get(n) is not None
+                   and nct_edades[n] <= NCT_CACHE_STALE_H}
+    nct_rancios = nct_vigilados - nct_frescos
+    nct_rancio = bool(nct_rancios)
 
     def _nombre_remitente(raw):
         """Saca el nombre visible de un 'from'. Si hay nombre propio ("{{CONTACTO}} {{CONTACTO}} <y@h.com>")
@@ -421,13 +440,14 @@ def detectar():
         # semanas no significa nada, y es justo el silencio que hace invisible que un ensayo
         # haya pasado a SUSPENDED/TERMINATED. Preferimos decir «no pude mirarlo».
         if nct_rancio and nct_vigilados and mark.get("nct_rancio_avisado") != _hoy_iso():
-            cuanto = ("%d día(s)" % int(nct_edad_h / 24)) if nct_edad_h else "no sé cuánto"
             avisos.append(("nct-rancio",
-                           "No puedo vigilar el estado de los ensayos: el caché lleva %s sin "
-                           "refrescarse (%d NCT). Revisa el daemon com.btp.nct-cache o lanza "
-                           "`python3 tools/actualizar_nct_cache.py --forzar`."
-                           % (cuanto, len(nct_vigilados))))
-        for nct_id in ((nct_vigilados & set(nct_actuales)) if not nct_rancio else ()):
+                           "No puedo vigilar el estado reciente de %d de %d ensayos: faltan "
+                           "datos o su última consulta exitosa supera %d h (%s). Revisa el daemon "
+                           "com.btp.nct-cache o lanza `python3 tools/actualizar_nct_cache.py --forzar`."
+                           % (len(nct_rancios), len(nct_vigilados), NCT_CACHE_STALE_H,
+                              ", ".join(sorted(nct_rancios)))))
+        # Un NCT rancio no impide avisar de un cambio confirmado en OTRO NCT.
+        for nct_id in sorted(nct_frescos):
             estado_nuevo = nct_actuales[nct_id]
             estado_viejo = nct_estados_prev.get(nct_id)
             if estado_viejo is None:
@@ -460,9 +480,8 @@ def detectar():
     # caché rancio NO se sella: sellar un fósil como «visto» haría que, al refrescarse, el
     # cambio real quedara enterrado bajo la línea base que acabamos de escribir nosotros.
     nct_sellar = dict(nct_estados_prev)
-    if not nct_rancio:
-        for nct_id in (nct_vigilados & set(nct_actuales)):
-            nct_sellar[nct_id] = nct_actuales[nct_id]
+    for nct_id in nct_frescos:
+        nct_sellar[nct_id] = nct_actuales[nct_id]
 
     estado = {
         "ts": datetime.now().isoformat(timespec="seconds"),
@@ -527,8 +546,11 @@ def main(argv):
         criticos, buzon_ids = _correo_estado()
         foco_hash, foco = _foco()
         plazos = _plazos_seguimiento()
-        nct_actuales, nct_edad_h = _nct_estados_desde_cache(con_edad=True)
+        nct_edades = {}
+        nct_actuales = _nct_estados_desde_cache(edades=nct_edades)
         nct_vigilados = _nct_ids_vigilados()
+        edades = [nct_edades.get(n) for n in nct_vigilados]
+        nct_edad_h = max(edades) if edades and None not in edades else None
         info = {
             "marcador": _cargar_mark().get("ts", "ausente"),
             "buzon": "ausente (gate App Password)" if buzon_ids is None else "%d msgs, %d NED-criticos" % (len(buzon_ids), len(criticos)),
@@ -543,6 +565,8 @@ def main(argv):
             # con datos de hace 29 días. Lo que hay que ver de un vistazo es si el dato SIRVE.
             "nct_cache_edad_h": round(nct_edad_h, 1) if nct_edad_h is not None else None,
             "nct_cache_fresco": (nct_edad_h is not None and nct_edad_h <= NCT_CACHE_STALE_H),
+            "nct_cache_edades_h": {n: round(nct_edades[n], 1) if nct_edades.get(n) is not None
+                                   else None for n in sorted(nct_vigilados)},
         }
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return 0
