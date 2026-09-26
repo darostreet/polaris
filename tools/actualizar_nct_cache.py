@@ -124,8 +124,16 @@ def _cache_necesita_actualizacion(cache, ncts):
         info = cache.get(nct)
         if info is None:
             return True
-        ts_str = (info.get("_ts_consulta", cache.get("_ts_consulta"))
-                  if isinstance(info, dict) else cache.get("_ts_consulta"))
+        if isinstance(info, dict):
+            estado = info.get("overallStatus")
+            if not isinstance(estado, str) or not estado.strip():
+                return True
+            ts_str = info.get("_ts_consulta", cache.get("_ts_consulta"))
+        elif isinstance(info, str) and info.strip():
+            # Compatibilidad con un formato legado que guardaba el estado como string.
+            ts_str = cache.get("_ts_consulta")
+        else:
+            return True
         try:
             ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
             if ts.tzinfo is None:
