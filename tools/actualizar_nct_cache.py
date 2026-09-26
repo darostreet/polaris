@@ -10,7 +10,7 @@ Flujo:
      disponible en el entorno. Si no hay acceso a BioMCP, usa la API pública REST v2 de
      clinicaltrials.gov directamente (sin clave, sin LLM, sin coste).
   3. Extrae SOLO el campo overallStatus (anti-inyección: no procesa nada más del JSON externo).
-  4. Guarda el caché en state/centinela/nct_cache.json con timestamp de la última consulta.
+  4. Guarda el caché en state/centinela/nct_cache.json con la última consulta exitosa por NCT.
   5. Compara con el caché previo y reporta cambios (sin avisar → eso lo hace centinela_ned.run).
 
 El caché tiene TTL configurable: si la última consulta tiene menos de MIN_HOURS_ENTRE_CONSULTAS
@@ -117,22 +117,33 @@ def _consultar_nct(nct_id):
 
 
 def _cache_necesita_actualizacion(cache, ncts):
-    """True si algún NCT vigilado falta en el caché o el caché es más viejo que el TTL."""
-    ts_str = cache.get("_ts_consulta")
-    if ts_str:
+    """True si algún NCT vigilado falta o su última consulta exitosa superó el TTL.
+    La fecha global solo es respaldo para registros legados SIN fecha propia."""
+    ahora = datetime.now(tz=timezone.utc)
+    for nct in ncts:
+        info = cache.get(nct)
+        if info is None:
+            return True
+        if isinstance(info, dict):
+            estado = info.get("overallStatus")
+            if not isinstance(estado, str) or not estado.strip():
+                return True
+            ts_str = info.get("_ts_consulta", cache.get("_ts_consulta"))
+        elif isinstance(info, str) and info.strip():
+            # Compatibilidad con un formato legado que guardaba el estado como string.
+            ts_str = cache.get("_ts_consulta")
+        else:
+            return True
         try:
-            ts = datetime.fromisoformat(ts_str)
+            ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
-            ahora = datetime.now(tz=timezone.utc)
             horas = (ahora - ts).total_seconds() / 3600
-            if horas < MIN_HOURS_ENTRE_CONSULTAS:
-                faltantes = [n for n in ncts if n not in cache]
-                if not faltantes:
-                    return False
-        except Exception:
-            pass
-    return True
+            if not 0 <= horas < MIN_HOURS_ENTRE_CONSULTAS:
+                return True
+        except (ValueError, TypeError, OverflowError):
+            return True
+    return False
 
 
 def actualizar(forzar=False):
@@ -149,21 +160,35 @@ def actualizar(forzar=False):
 
     print("Consultando ClinicalTrials.gov para: %s" % ", ".join(sorted(ncts)))
     cambios = []
+    completo = True
+    # Fijar la fecha LEGADA antes de mover la global: un éxito de A no rejuvenece B,
+    # ni siquiera si B dejó de vigilarse y vuelve a entrar después. None = fecha desconocida.
+    for nct_id, info in list(cache.items()):
+        if re.fullmatch(r"NCT\d{6,}", nct_id, re.IGNORECASE):
+            if isinstance(info, str):
+                info = cache[nct_id] = {"overallStatus": info}
+            if isinstance(info, dict):
+                info.setdefault("_ts_consulta", cache.get("_ts_consulta"))
     for nct_id in sorted(ncts):
         prev = cache.get(nct_id, {})
         prev_status = prev.get("overallStatus") if isinstance(prev, dict) else prev
         nuevo_status = _consultar_nct(nct_id)
-        if nuevo_status is None:
+        if not isinstance(nuevo_status, str) or not nuevo_status.strip():
+            completo = False
             print("  %s: sin respuesta (se conserva el estado previo: %s)" % (nct_id, prev_status or "desconocido"))
             continue
-        cache[nct_id] = {"overallStatus": nuevo_status}
+        cache[nct_id] = {"overallStatus": nuevo_status,
+                         "_ts_consulta": datetime.now(tz=timezone.utc).isoformat(timespec="seconds")}
         if prev_status and prev_status != nuevo_status:
             cambios.append((nct_id, prev_status, nuevo_status))
             print("  %s: CAMBIO %s -> %s" % (nct_id, prev_status, nuevo_status))
         else:
             print("  %s: %s (sin cambio)" % (nct_id, nuevo_status))
 
-    cache["_ts_consulta"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+    # Compatibilidad con lectores anteriores y el TTL de 6 h: solo una pasada COMPLETA
+    # renueva la fecha global. Un fallo conserva la edad y permite el siguiente intento.
+    if completo:
+        cache["_ts_consulta"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
     _guardar_cache(cache)
     print("Cache guardado en %s" % NCT_CACHE)
     if cambios:
@@ -176,13 +201,16 @@ def status():
     cache = _cargar_cache()
     ncts = _nct_ids_vigilados()
     ts = cache.get("_ts_consulta", "nunca")
-    print("Ultima consulta: %s" % ts)
+    print("Ultima consulta completa: %s" % ts)
     print("NCTs vigilados: %s" % (", ".join(sorted(ncts)) or "(ninguno)"))
     for nct_id in sorted(ncts):
         info = cache.get(nct_id, "(sin datos)")
         if isinstance(info, dict):
             info = info.get("overallStatus", "(sin overallStatus)")
         print("  %s: %s" % (nct_id, info))
+        entrada = cache.get(nct_id)
+        fecha = entrada.get("_ts_consulta", ts) if isinstance(entrada, dict) else ts
+        print("    ultima consulta exitosa: %s" % (fecha or "desconocida"))
 
 
 def main(argv):
