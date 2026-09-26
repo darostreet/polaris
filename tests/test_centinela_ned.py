@@ -466,6 +466,17 @@ class FrescuraNctCache(unittest.TestCase):
                 self.assertEqual(nuevo["_ts_consulta"], previo["_ts_consulta"])
                 self.assertEqual(nuevo[NCT_A]["overallStatus"], "RECRUITING")
 
+    def test_estado_ausente_o_corrupto_no_cuenta_como_fresco(self):
+        for estado in (None, "", "   ", True, 123, [], {}):
+            with self.subTest(estado=estado):
+                c = self._cache(edad=1, propia=True)
+                c[NCT_A]["overallStatus"] = estado
+                self.up._guardar_cache(c)
+                self.assertTrue(self.up._cache_necesita_actualizacion(c, {NCT_A, NCT_B}))
+                self.assertNotIn(NCT_A, self.cn._nct_estados_desde_cache())
+                self.assertFalse(self._status()["nct_cache_fresco"])
+                self.assertIn("nct-rancio", [t for t, _ in self.cn.detectar()[0]])
+
     def test_metadata_no_es_un_ensayo_y_no_cambia_estado(self):
         c = self._cache(edad=1, propia=True)
         c["_extra"] = {"overallStatus": "COMPLETED", "_ts_consulta": "ayer"}
