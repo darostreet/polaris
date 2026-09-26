@@ -1,0 +1,109 @@
+name: research-ctgov-pagination
+on:
+  push:
+    branches: [research/ctgov-pagination-20260926]
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Medir cobertura real de las queries CT.gov del radar
+        shell: python
+        run: |
+          import json, sys, time, urllib.parse, urllib.request
+          from datetime import timedelta
+          sys.path.insert(0, "tools")
+          import radar_ned_diario as r
+
+          ACTIVE = {"RECRUITING", "NOT_YET_RECRUITING", "ENROLLING_BY_INVITATION",
+                    "ACTIVE_NOT_RECRUITING"}
+          fields = ("NCTId,BriefTitle,OverallStatus,LastUpdatePostDate,Phase,"
+                    "LocationCountry,EnrollmentCount,DesignAllocation,LeadSponsorClass,HasResults,"
+                    "StudyType,DesignPrimaryPurpose,InterventionType,HealthyVolunteers,Sex,"
+                    "Condition,ConditionMeshTerm,Keyword,EligibilityCriteria,WhyStopped")
+          endpoint = r.CTGOV
+          hoy = r._hoy()
+          resultados = {"fecha": hoy.isoformat(), "page_size_produccion": r.MAX_POR_FUENTE,
+                        "ventanas": {}}
+
+          def get(params):
+              url = endpoint + "?" + urllib.parse.urlencode(params)
+              req = urllib.request.Request(url, headers={"User-Agent": r.UA})
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return json.loads(resp.read().decode("utf-8"))
+
+          for dias in (3, 7, 30):
+              desde = hoy - timedelta(days=max(1, dias))
+              filas = []
+              for tema in r.TEMAS:
+                  term = tema.get("ctgov")
+                  if not term:
+                      continue
+                  filtro = (tema.get("ctgov_filtro")
+                            or "AREA[LastUpdatePostDate]RANGE[{desde},MAX]").format(
+                                desde=desde.isoformat())
+                  base = {"query.term": term, "filter.advanced": filtro,
+                          "pageSize": str(r.MAX_POR_FUENTE), "fields": fields,
+                          "format": "json", "countTotal": "true"}
+                  try:
+                      first = get(base)
+                      studies = list(first.get("studies") or [])
+                      first_n = len(studies)
+                      total = first.get("totalCount")
+                      token = first.get("nextPageToken")
+                      pages = 1
+                      while token:
+                          p = dict(base)
+                          p.pop("countTotal", None)
+                          p["pageToken"] = token
+                          d = get(p)
+                          studies.extend(d.get("studies") or [])
+                          token = d.get("nextPageToken")
+                          pages += 1
+                          time.sleep(0.06)
+                      beyond = studies[r.MAX_POR_FUENTE:]
+                      def bits(s):
+                          p=s.get("protocolSection") or {}
+                          st=p.get("statusModule") or {}
+                          locs=((p.get("contactsLocationsModule") or {}).get("locations") or [])
+                          return (st.get("overallStatus") or "",
+                                  any(isinstance(x,dict) and x.get("country")=="Spain" for x in locs))
+                      b=[bits(s) for s in beyond]
+                      filas.append({
+                          "tema": tema["clave"], "prio": tema.get("prio"),
+                          "first_page": first_n, "totalCount": total,
+                          "all_fetched": len(studies), "pages": pages,
+                          "beyond_25": len(beyond),
+                          "beyond_25_active": sum(1 for st,_ in b if st in ACTIVE),
+                          "beyond_25_spain": sum(1 for _,es in b if es),
+                          "beyond_25_active_spain": sum(1 for st,es in b if st in ACTIVE and es),
+                      })
+                  except Exception as e:
+                      filas.append({"tema": tema["clave"], "prio": tema.get("prio"),
+                                    "error": type(e).__name__ + ": " + str(e)[:180]})
+              resultados["ventanas"][str(dias)] = filas
+
+          for dias, filas in resultados["ventanas"].items():
+              valid=[x for x in filas if "error" not in x]
+              print("VENTANA", dias, "dias")
+              print("queries", len(valid),
+                    "truncadas", sum(1 for x in valid if x["beyond_25"]>0),
+                    "beyond25", sum(x["beyond_25"] for x in valid),
+                    "active_beyond25", sum(x["beyond_25_active"] for x in valid),
+                    "spain_beyond25", sum(x["beyond_25_spain"] for x in valid))
+              for x in valid:
+                  if x["beyond_25"] > 0:
+                      print("  ", json.dumps(x, ensure_ascii=False, sort_keys=True))
+              for x in filas:
+                  if "error" in x:
+                      print("  ERROR", json.dumps(x, ensure_ascii=False, sort_keys=True))
+
+          with open("ctgov-pagination-results.json","w") as f:
+              json.dump(resultados,f,ensure_ascii=False,indent=2)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctgov-pagination-results
+          path: ctgov-pagination-results.json
