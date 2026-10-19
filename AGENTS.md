@@ -63,3 +63,21 @@ Codex (incluido en el plan ChatGPT de {{TITULAR}}) se usa **solo para contrastar
   Codex **aconseja**; Claude **reconcilia y escribe** (¡verifica! en la 1ª prueba el hallazgo nº1 de Codex era falso). Nunca dos agentes escribiendo el mismo fichero.
 - **Auth/coste:** ✅ `codex exec` funciona con el login de ChatGPT de {{TITULAR}} = **gratis** (no necesita `OPENAI_API_KEY`). Ojo: `codex exec` NO acepta `--ask-for-approval` (ya es no-interactivo); basta `-s read-only`.
 - **Instalar y entrar (lo hace {{TITULAR}}, 1 vez):** `brew install codex` → `codex` → *Sign in with ChatGPT*.
+
+## CI y fallback local
+
+Esta regla aplica al espejo público derivado y a sus PRs. No autoriza subir el repo privado, su historial clínico ni datos sensibles a GitHub.
+
+- Si `.github/workflows/contribuciones.yml` puede ejecutar el commit exacto, usa esa corrida real como verificación independiente. Un rojo no se ignora solo porque local pase.
+- Si GitHub Actions no puede correr por infraestructura (runner/servicio no disponible, cuota o billing, caída de Actions, o workflow no disparable), reproduce el gate sobre una copia saneada del mismo HEAD público. Nunca ejecutes este fallback apuntando a la fuente de verdad privada ni uses datos clínicos reales.
+- Estados obligatorios: `CI PASS` solo para una corrida real verde; `LOCAL CI-EQUIVALENT PASS/FAIL` para el fallback; `CI UNAVAILABLE` si no existe un equivalente confiable. Si CI real y local discrepan, el cambio no está validado hasta explicar la diferencia.
+- Equivalente local del workflow público:
+
+```bash
+python3 tools/ci_barrido.py --diff "origin/master...HEAD"
+python3 tools/ci_barrido.py --selftest
+python3 -m compileall -q tools tests pipeline evals
+BTP_PORTABLE=1 bash tests/test_all.sh
+```
+
+- En un `push` ya integrado, el barrido equivalente es `python3 tools/ci_barrido.py --todo`. La regla de no hacer `git push` desde el repo privado sigue intacta.
